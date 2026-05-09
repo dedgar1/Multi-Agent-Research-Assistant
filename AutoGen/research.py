@@ -145,20 +145,108 @@ gap_agent = AssistantAgent(
     """
 )
 
+# Track whether the user has already approved once
+user_approved = False
+
+def selector_func_with_user_proxy(messages: Sequence[BaseAgentEvent | BaseChatMessage]) -> str | None:
+    global user_approved
+
+    # If first message, start with topic agent
+    if len(messages) == 0:
+        return topic_agent.name
+
+    last_source = messages[-1].source
+
+    # If topic_agent just finished, ask for human approval ONCE
+    if last_source == topic_agent.name and not user_approved:
+        return user_proxy_agent.name
+
+    # If user just responded (approve or reject)
+    if last_source == user_proxy_agent.name:
+        content = messages[-1].content.upper()
+        if "APPROVE" in content:
+            user_approved = True
+            # Proceed to the next logical agent (e.g., paper_agent)
+            return paper_agent.name
+        else:
+            # If disapproved, return to topic_agent for revision
+            return topic_agent.name
+
+    # After approval, let the rest of the agents talk automatically
+    if user_approved:
+        return None  # means use default sequencing in SelectorGroupChat
+
+    return None
+
+text_mention_termination = TextMentionTermination("FINAL REPORT")
+max_messages_termination = MaxMessageTermination(max_messages=10)
+termination = max_messages_termination | text_mention_termination
+
+user_proxy_agent = UserProxyAgent(
+    "UserProxyAgent",
+    description="A proxy for the user to approve or disapprove tasks."
+)
+
+# Track whether the user has already approved once
+user_approved = False
+
+def selector_func_with_user_proxy(messages: Sequence[BaseAgentEvent | BaseChatMessage]) -> str | None:
+    global user_approved
+
+    # If first message, start with topic agent
+    if len(messages) == 0:
+        return topic_agent.name
+
+    last_source = messages[-1].source
+
+    # If topic_agent just finished, ask for human approval ONCE
+    if last_source == topic_agent.name and not user_approved:
+        return user_proxy_agent.name
+
+    # If user just responded (approve or reject)
+    if last_source == user_proxy_agent.name:
+        content = messages[-1].content.upper()
+        if "APPROVE" in content:
+            user_approved = True
+            # Proceed to the next logical agent (e.g., paper_agent)
+            return paper_agent.name
+        else:
+            # If disapproved, return to topic_agent for revision
+            return topic_agent.name
+
+    # After approval, let the rest of the agents talk automatically
+    if user_approved:
+        return None  # means use default sequencing in SelectorGroupChat
+
+    return None
+
+
 async def main():
-    topic_result = await topic_agent.run(task="AI in healthcare")
-    print(topic_result.messages[-1].content)
+    selector_prompt = """Select an agent to perform task.
 
-    paper_result = await paper_agent.run(task=topic_result.messages[-1].content)
-    print(paper_result.messages[-1].content)
+    {roles}
 
-    insight_result = await insight_agent.run(task=paper_result.messages[-1].content)
-    print(insight_result.messages[-1].content)
+    Current conversation context:
+    {history}
 
-    report_result = await report_agent.run(task=insight_result.messages[-1].content)
-    print(report_result.messages[-1].content)
+    Read the above conversation, then select an agent from {participants} to perform the next task.
+    Make sure the topic agent has assigned tasks before other agents start working.
+    Only select one agent.
+    """
 
-    gap_result = await gap_agent.run(task=report_result.messages[-1].content)
-    print(gap_result.messages[-1].content)
+    task = "AI for healthcare"
+
+
+    # Run the chat again with the user proxy agent and selector function.
+    team = SelectorGroupChat(
+        [topic_agent, paper_agent, insight_agent, report_agent, gap_agent, user_proxy_agent],
+        model_client=model_client,
+        termination_condition=termination,
+        selector_prompt=selector_prompt,
+        selector_func=selector_func_with_user_proxy,
+        allow_repeated_speaker=False,
+    )
+    await Console(team.run_stream(task=task))
+    
 
 asyncio.run(main())
